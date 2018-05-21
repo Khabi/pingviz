@@ -1,202 +1,303 @@
+// PingViz: A handy application to visualize latency
+// through a statsd interface
+
 package main
 
 import (
 	"os"
+	"os/signal"
 	"fmt"
 	"sync"
+	"net"
 	"strings"
-	"os/signal"
-	"math/rand"
-	"github.com/spf13/viper"
 	"time"
-	"gopkg.in/alexcesaro/statsd.v2"
+	"math/rand"
 	log "github.com/Sirupsen/logrus"
-    "net"
-    "golang.org/x/net/icmp"
+	"github.com/spf13/viper"
+	"gopkg.in/alexcesaro/statsd.v2"
+	"golang.org/x/net/icmp"
     "golang.org/x/net/ipv4"
 )
 
+const ProtocolICMP = 1
+const ListenAddr = "0.0.0.0"
+
 var wg sync.WaitGroup
+var hostChan chan checkHost
 var stopChan chan os.Signal
-var ListenAddr = "0.0.0.0"
 
-const (
-    ProtocolICMP = 1
-)
-
-
-type Host struct {
-	SHost 				string 			// statsd host
-	Server				string 			// Host to report on
-	TTL					time.Duration	// Time before returning a timeout 
-	Sleep				time.Duration	// Time between pings
-	SuccesReportString 	string 			// statsd reporting name
-	FailedReportString	string 			// statsd failed pings
+type checkHost struct {
+	name			string
+	aRecord			*net.IPAddr
+	ttl				time.Duration
+	sleep			time.Duration
+	successMetric 	string
+	failedMetric 	string
 }
 
-func (h Host) Reporter(close <- chan os.Signal, wg *sync.WaitGroup) {
-	log.Debug("Reporting stats for ", h.Server, " to ", h.SHost)
-	c, err := statsd.New(statsd.Address(h.SHost))
+// Config File Options
+//
+// ttl -> time.Duration (Default: '1s')
+// : Duration before a packet is considered dropped.
+//
+// log -> string (Default: info)
+// : Logging level
+//
+// sleep -> time.Duration (Default: '2s')
+// : Duration between ping runs
+//
+// report.host -> string 
+// : Statsd host to report to
+//   
+// report.prefix -> string
+// : Prefix for reporting metrics into statsd
+//
+// report.postfix -> string
+// : Postfix for reporting metrics into statsd
+//
+// report.normalize -> bool (Default: false)
+// : Normalize hostnames / IPs being reported by turning periods into a non-special character (report.normalize_char)
+//
+// report.normalize_char -> string (Default: "_")
+// : Character to substitute '.' for when report.naormalize equals True
+//
+// report.successful -> string (Default: "response.")
+// : Statsd prefix for successful responses
+//
+// report.failed -> string (Default: "failed.")
+// : Statsd prefix for dropped responses
+//
+// hosts.* -> map[string][]string
+// : Group of hosts that belong together.  Group names get appended to the metrics hosts.
+func readConfig(){
+	viper.SetConfigName("pingviz") 
+	viper.AddConfigPath("/etc/")
+	viper.AddConfigPath("$HOME/.config/")
+	viper.AddConfigPath(".")
+
+	viper.SetDefault("ttl", "1s")
+	viper.SetDefault("sleep", "2s")
+	viper.SetDefault("log", "info")
+	viper.SetDefault("report.normalize", false)
+	viper.SetDefault("report.normalize_char", "_")
+	viper.SetDefault("report.successful", "response.")
+	viper.SetDefault("report.failed", "failed.")
+
+	err := viper.ReadInConfig()
 	if err != nil {
-		log.Error("Unable to connect to ", h.SHost)
-		wg.Done()
-		return
+		fmt.Printf("Unable to load configuration file.")
+		os.Exit(1)
 	}
-	defer c.Close()
+}
+
+
+// Return a formatted string to report back to statsd
+func metricName(host string, group string) (successful string, failed string) {
+	if viper.GetBool("report.normalize") {
+		host = strings.Replace(host, ".", viper.GetString("report.normalize_char"), -1)
+	}
+
+	successful = fmt.Sprintf(
+		"%s%s%s.%s%s",
+		viper.GetString("report.prefix"),
+		viper.GetString("report.successful"),
+		group,
+		host,
+		viper.GetString("report.postfix"),
+	)
+	failed = fmt.Sprintf(
+		"%s%s%s.%s%s",
+		viper.GetString("report.prefix"),
+		viper.GetString("report.failed"),
+		group,
+		host, 
+		viper.GetString("report.postfix"),
+	)
+
+	return
+}
+
+// Dispatcher running on a timer.
+func (c checkHost) dispatch(hostchan chan <- checkHost, close <- chan os.Signal, wg *sync.WaitGroup) {
+	log.WithFields(log.Fields{
+		"host": c.name,
+		"statsd_server": viper.GetString("report.host"),
+	}).Debug("Starting Dispatcher")
 
 	for {
 		select {
 		default:
-			dst, dur, err := Ping(h.Server)
-			if err != nil {
-				log.Debug("ERROR! ", h.Server)
-				log.Debug(err)
-				c.Increment(h.FailedReportString)
-			} else {
-				log.Info(dst, dur)
-				c.Timing(h.SuccesReportString, dur.Seconds() * 1e3)
-
-			}
-			time.Sleep(h.Sleep)
+			hostchan <- c
+			time.Sleep(c.sleep)
 		case <-close:
+			log.Debug("Stopping dispatcher for ", c.name)
 			wg.Done()
 			return
 		}
 	}
 }
 
-func Ping(addr string) (*net.IPAddr, time.Duration, error) {
-    // Start listening for icmp replies
-    c, err := icmp.ListenPacket("ip4:icmp", ListenAddr)
+func ping(host <- chan checkHost, wg *sync.WaitGroup) {
+	log.Debug("Starting Pinger")
+
+	statsdClient, err := statsd.New(statsd.Address(viper.GetString("report.host")))
+	if err != nil {
+		log.Fatal("Unable to connect to statsd host")
+	} else {
+		log.WithFields(log.Fields{
+			"host": viper.GetString("report.host"),
+		}).Debug("Connected to statsd")
+	}
+	defer statsdClient.Close()
+
+	// Start Listening for icmp replies
+	c, err := icmp.ListenPacket("ip4:icmp", ListenAddr)
     if err != nil {
-        return nil, 0, err
+        log.Fatal("Unable to listen for ICMP packets.  Are you running as root?")
     }
     defer c.Close()
-    seq := rand.Intn(65535)
 
-    // Resolve any DNS (if used) and get the real IP of the target
-    dst, err := net.ResolveIPAddr("ip4", addr)
-    if err != nil {
-        panic(err)
-        return nil, 0, err
-    }
+    for h := range host{
+		seq := rand.Intn(65535)
 
-    // Make a new ICMP message
-    m := icmp.Message{
-        Type: ipv4.ICMPTypeEcho, Code: 0,
-        Body: &icmp.Echo{
-            ID: os.Getpid() & 0xffff, Seq: seq,
-            Data: []byte(""),
-        },
-    }
-    b, err := m.Marshal(nil)
-    if err != nil {
-        return dst, 0, err
-    }
+	    m := icmp.Message{
+	        Type: ipv4.ICMPTypeEcho, Code: 0,
+	        Body: &icmp.Echo{
+	            ID: os.Getpid() & 0xffff, Seq: seq,
+	            Data: []byte("pingviz"),
+	        },
+	    }
+	    b, err := m.Marshal(nil)
+	    if err != nil {
+			log.WithFields(log.Fields{
+				"host": h.name,
+				"sequence": seq,
+			}).Warn("Unable to create ICMP packet")
+			continue
+	    }
 
+	    // Time we sent the packet
+	    start := time.Now()
 
-    // Send it
-    start := time.Now()
-    n, err := c.WriteTo(b, dst)
-    if err != nil {
-        return dst, 0, err
-    } else if n != len(b) {
-        return dst, 0, fmt.Errorf("got %v; want %v", n, len(b))
-    }
+	    n, err := c.WriteTo(b, h.aRecord)
+	    if err != nil {
+	        log.WithFields(log.Fields{
+	        	"host": h.name,
+	        	"sequence": seq,
+	        }).Error("Unable to send ICMP packet")
+	        continue
+	    } else if n != len(b) {
+	        log.WithFields(log.Fields{
+	        	"host": h.name,
+	        	"sequence": seq,
+	        }).Error("Packet Size mismatch")
+	        continue
+	    }
 
-    // Wait for a reply
-    reply := make([]byte, 1500)
-    err = c.SetReadDeadline(time.Now().Add(1 * time.Second))
-    if err != nil {
-        return dst, 0, err
-    }
-    
-    for {
-    	n, peer, err := c.ReadFrom(reply) 
-    	if err != nil {
-        	return dst, 0, err
-    	}
+	    reply := make([]byte, 1500)
+	    err = c.SetReadDeadline(time.Now().Add(h.ttl))
+	    if err != nil {
+	        log.Error("unable to set deadline")
+	    }
 
-    	if peer.String() == addr  {
-		    // Pack it up boys, we're done here
-		    rm, err := icmp.ParseMessage(ProtocolICMP, reply[:n])
-		    if err != nil {
-		        return dst, 0, err
-		    }
-
-
-			switch pkt := rm.Body.(type) {
-			case *icmp.Echo:
-				if pkt.Seq == seq {
+	   	READ:
+	    for {
+	    	n, peer, err := c.ReadFrom(reply) 
+	    	if err != nil {
 					duration := time.Since(start)
-					return dst, duration, nil
-				}
-			default:
-				return dst, 0, fmt.Errorf("got %+v from %v; want echo reply", rm, peer)
-			}
-    	}
-    }	
+					log.WithFields(log.Fields{
+						"host": h.name,
+						"duration": duration,
+						"sequence": seq,
+					}).Warn("Dropped Ping")
+					statsdClient.Increment(h.failedMetric)
+					break READ
+	    	}
 
+	    	if peer.String() == h.aRecord.String()  {
+			    rm, err := icmp.ParseMessage(ProtocolICMP, reply[:n])
+			    if err != nil {
+			        log.Error("Unable to Parse ICMP Message")
+			    }
+
+
+				switch pkt := rm.Body.(type) {
+				case *icmp.Echo:
+					if pkt.Seq == seq {
+						duration := time.Since(start)
+						log.WithFields(log.Fields{
+							"host": h.name,
+							"duration": duration,
+							"sequence": seq,
+						}).Debug("Recived Ping")
+
+						statsdClient.Timing(h.successMetric, duration.Seconds() * 1e3)
+						break READ
+					}
+				default:
+					log.Error("Unknown Error")
+				}
+	    	}
+	    }
+
+	}
+	log.Debug("Closing Pinger")
 }
 
-
-
 func main() {
-
-	// Config Options
-	viper.SetConfigName("gp") 
-	viper.AddConfigPath("/etc/")
-	viper.AddConfigPath("$HOME/.config/")
-	viper.AddConfigPath(".")
-
-	viper.SetDefault("ttl", "1s")
-	viper.SetDefault("log", "info")
-	viper.SetDefault("report.normalize", false)
-
-	err := viper.ReadInConfig()
-	if err != nil {
-		log.Fatal("Fatal error config file: %s \n", err)
-	}
+	readConfig()
 
 	level, _ := log.ParseLevel(viper.GetString("log"))
 	log.SetLevel(level)
 
-	log.Info("Starting up PingViz")
-	log.Info("Setting log level to ", level)
+	log.WithFields(log.Fields{
+		"loglevel": level,
+	}).Info("Starting up PingViz")
 
-	statsd_prefix := viper.GetString("report.pre")
-	statsd_postfix := viper.GetString("report.post")
+
+	hostChan = make(chan checkHost, 1)
+	go ping(hostChan, &wg)
 
 	for group := range viper.GetStringMapString("hosts") {
 		config_group := fmt.Sprintf("hosts.%s", group)
 		for _, host := range viper.GetStringSlice(config_group) {
-				var normal_host string
-				if viper.GetBool("report.normalize") {
-					normal_host = strings.Replace(host, ".", "_", -1)
-				} else {
-					normal_host = host
-				}
+			successMetric, failedMetric := metricName(host, group)
 
-				SuccessfulRS := fmt.Sprintf("%s%s%s.%s%s", statsd_prefix, viper.GetString("report.successful"), group, normal_host, statsd_postfix)
-				FailedRS := fmt.Sprintf("%s%s%s.%s%s", statsd_prefix, viper.GetString("report.failed"), group, normal_host, statsd_postfix)
 
-				h := Host{
-					SHost: viper.GetString("report.host"),
-					TTL: viper.GetDuration("ttl"),
-					Sleep: viper.GetDuration("sleep"),
-					SuccesReportString: SuccessfulRS,
-					FailedReportString: FailedRS,
-					Server: host,
-				}
-				wg.Add(1)
+			// Resolve DNS or parse IP address
+    		dst, err := net.ResolveIPAddr("ip4", host)
+    		if err != nil {
+    			log.WithFields(log.Fields{
+					"host": host,
+				}).Warn("Unable to resolve host; will not ping.")
+    			continue
+    		}
 
-				stopChan = make(chan os.Signal, 1)
-				signal.Notify(stopChan, os.Interrupt)
+			log.WithFields(log.Fields{
+				"group": group,
+				"host": host,
+				"a_record": dst,
+				"success_metric": successMetric,
+				"failed_metric": failedMetric,
+			}).Debug("Found Host")
 
-				go h.Reporter(stopChan, &wg)
+			c := checkHost{
+				name: 			host,
+				aRecord: 		dst,
+				ttl:			viper.GetDuration("ttl"),
+				sleep:			viper.GetDuration("sleep"),
+				successMetric: 	successMetric,
+				failedMetric: 	failedMetric,	
+			}
+
+			stopChan = make(chan os.Signal, 1)
+			signal.Notify(stopChan, os.Interrupt)
+			wg.Add(1)
+
+			go c.dispatch(hostChan, stopChan, &wg)
 		}
 	}
 
 	wg.Wait()
-	log.Info(viper.GetStringSlice("hosts.internal"))
+	close(hostChan)
 }
