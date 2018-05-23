@@ -2,9 +2,13 @@ image: golang:1.10
 stages:
   - build
 
+variables:
+
+
 before_script:
+  - echo $(env)
   - ln -s /builds /go/src/gitlab.com
-  - cd /go/src/github.com/user/Khabi/pingviz
+  - cd /go/src/github.com/Khabi/pingviz
 
 build-pingviz:
   stage: build
