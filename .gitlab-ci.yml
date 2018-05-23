@@ -9,7 +9,6 @@ variables:
 
 
 before_script:
-  - echo $(env)
   - ln -s /builds /go/src/gitlab.com
 
 build-pingviz:
