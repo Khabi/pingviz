@@ -11,13 +11,12 @@ variables:
 before_script:
   - ln -s /builds /go/src/gitlab.com
 
-build-pingviz:
+pingviz-release:
   stage: build
   script:
     - cd $SRCDIR
     - go get
     - go install
-    - ls -alh
 
   artifacts:
     paths:
