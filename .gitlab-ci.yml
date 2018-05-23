@@ -11,16 +11,14 @@ variables:
 before_script:
   - echo $(env)
   - ln -s /builds /go/src/gitlab.com
-  - cd $SRCDIR
-  - go get
-  - go install
-  - ls -alh
 
 build-pingviz:
   stage: build
   script:
+    - cd $SRCDIR
     - go get
     - go install
+    - ls -alh
 
   artifacts:
     paths:
