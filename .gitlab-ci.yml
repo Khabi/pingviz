@@ -3,7 +3,7 @@ stages:
   - build
 
 variables:
-  SRCDIR: /go/src/gitlub.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME
+  SRCDIR: /go/src/gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME
   GOBIN: SRCDIR/artifacts
 
 before_script:
