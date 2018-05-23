@@ -1,0 +1,13 @@
+image: golang:1.10
+stages:
+  - build
+
+before_script:
+  - ln -s /builds /go/src/gitlab.com
+  - cd /go/src/github.com/user/Khabi/build-pingviz
+
+build-pingviz:
+  stage: build
+  script:
+    - go get
+    - go install
