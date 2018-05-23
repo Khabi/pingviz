@@ -4,8 +4,8 @@ stages:
 
 variables:
   SRCDIR: /go/src/gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME
-  ARTIFACTDIR: artifacts
-  GOBIN: /go/src/gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/artifacts
+  ARTIFACTDIR: release
+  GOBIN: /go/src/gitlab.com/$CI_PROJECT_NAMESPACE/$CI_PROJECT_NAME/release
 
 
 before_script:
