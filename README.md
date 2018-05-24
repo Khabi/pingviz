@@ -24,7 +24,7 @@ Download the build artifact off of gitlab (http://gitlab.com/Khabi/pingviz/), cr
 ![](docs/dropped_graph.png)
 
 Both examples above were generated from this config.
-```
+```yaml
 log: debug
 ttl: 1s
 sleep: 5s 
