@@ -1,19 +1,19 @@
 log: debug
-ttl: 10s
-sleep: 10s 
+ttl: 1s
+sleep: 5s 
 
 report:
   host: log:8125
   prefix: pingviz.
-  postfix: .test
   normalize: True
   normalize_char: "-"
-  successful: ttl
-  failed: lost
+  successful: received. 
+  failed: dropped. 
 
 hosts:
   internal:
     - "192.168.100.1"
+    - "10.0.0.33"
     - "10.0.0.1"
   dns:
     - "8.8.8.8"
